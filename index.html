@@ -16,7 +16,6 @@
 
         .space-font { font-family: 'Orbitron', sans-serif; }
 
-        /* アニメーションする星空の背景 */
         #stars-container {
             position: fixed;
             top: 0;
@@ -64,15 +63,32 @@
             box-shadow: 0 0 25px rgba(59, 130, 246, 0.8);
         }
 
-        /* カスタムスクロールバー */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #090a0f; }
         ::-webkit-scrollbar-thumb { background: #1e3a8a; border-radius: 4px; }
+
+        #loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: #090a0f;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            transition: opacity 0.5s ease;
+        }
     </style>
 </head>
 <body class="min-h-screen">
 
-    <!-- 星のコンテナ -->
+    <!-- 読み込み中オーバーレイ -->
+    <div id="loading-overlay">
+        <div class="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p class="space-font text-blue-400 tracking-widest animate-pulse">CONNECTING TO STELLA NETWORK...</p>
+    </div>
+
+    <!-- 星空背景 -->
     <div id="stars-container"></div>
 
     <!-- ヘッダー -->
@@ -111,7 +127,6 @@
 
             <!-- ファイルリスト -->
             <div class="grid gap-6" id="fileList">
-                <!-- JSで生成 -->
                 <div id="noFilesMessage" class="text-center py-20 text-gray-500">
                     <p class="text-xl mb-2">📡 信号が検出されません</p>
                     <p class="text-sm">現在、アーカイブに公開されているリソースはありません。</p>
@@ -146,7 +161,6 @@
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <!-- 左側：新規アップロード -->
                 <div class="md:col-span-1">
                     <div class="glass-panel p-6 rounded-3xl sticky top-8">
                         <h3 class="font-bold mb-6 flex items-center gap-2 text-blue-300 uppercase text-xs space-font">
@@ -162,19 +176,18 @@
                                 <label class="block text-[10px] text-blue-300 uppercase mb-2 ml-1 space-font font-bold">ペイロード (PDF)</label>
                                 <input type="file" id="fileInput" accept=".pdf" class="w-full text-[10px] text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-[10px] file:font-bold file:bg-blue-900 file:text-blue-100 hover:file:bg-blue-800 cursor-pointer">
                             </div>
-                            <button onclick="handleUpload()" class="w-full btn-space text-white py-4 rounded-2xl font-bold text-sm tracking-widest uppercase space-font">
+                            <button id="uploadBtn" onclick="handleUpload()" class="w-full btn-space text-white py-4 rounded-2xl font-bold text-sm tracking-widest uppercase space-font disabled:opacity-50">
                                 データを配信する
                             </button>
                         </div>
                     </div>
                 </div>
 
-                <!-- 右側：管理リスト -->
                 <div class="md:col-span-2">
                     <div class="glass-panel p-6 rounded-3xl min-h-[500px]">
                         <h3 class="text-sm font-bold mb-6 text-blue-300 uppercase space-font tracking-tighter">アーカイブ管理 (合計: <span id="fileCount">0</span>)</h3>
                         <div id="adminFileList" class="space-y-4">
-                            <!-- JSで生成 -->
+                            <!-- JS -->
                         </div>
                     </div>
                 </div>
@@ -182,9 +195,108 @@
         </div>
     </div>
 
-    <script>
-        const ADMIN_PASS = "893012";
-        let files = JSON.parse(localStorage.getItem('pdf_files')) || [];
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
+
+        // Firebase設定
+        const firebaseConfig = {
+            apiKey: "AIzaSyBuVoAF57r2e_KbLAArLklApFLDlAxKyEQ",
+            authDomain: "review-240f4.firebaseapp.com",
+            projectId: "review-240f4",
+            storageBucket: "review-240f4.firebasestorage.app",
+            messagingSenderId: "51197210846",
+            appId: "1:51197210846:web:79e0a54299ce79f285124f",
+            measurementId: "G-6N8HRSWV61"
+        };
+
+        // 初期化
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        // 重要：__app_idが環境変数にある場合はそれを使用し、なければデフォルト値を使用
+        const appId = typeof __app_id !== 'undefined' ? __app_id : "review-240f4-stella";
+
+        // グローバル参照
+        window.db = db;
+        window.appId = appId;
+        window.collection = collection;
+        window.addDoc = addDoc;
+        window.onSnapshot = onSnapshot;
+        window.deleteDoc = deleteDoc;
+        window.doc = doc;
+        window.query = query;
+        window.serverTimestamp = serverTimestamp;
+
+        let currentUser = null;
+        let files = [];
+        let unsubscribeSync = null;
+
+        // 星空生成
+        createStars();
+
+        // 匿名認証の開始（Firestore操作の前に必ず完了させる必要がある）
+        const initAuth = async () => {
+            try {
+                // 既にサインインしていないか確認
+                if (!auth.currentUser) {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.error("Authentication failed:", err);
+                alert("サーバーとの接続に失敗しました。ページを再読み込みしてください。");
+            }
+        };
+
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                // 認証完了後に同期を開始
+                startSync();
+                document.getElementById('loading-overlay').style.opacity = '0';
+                setTimeout(() => {
+                    document.getElementById('loading-overlay').style.display = 'none';
+                }, 500);
+            } else {
+                currentUser = null;
+                if (unsubscribeSync) unsubscribeSync();
+            }
+        });
+
+        // Firestoreとのリアルタイム同期
+        function startSync() {
+            if (!currentUser) return;
+            if (unsubscribeSync) unsubscribeSync();
+
+            // 正しいパスルール: /artifacts/{appId}/public/data/{collectionName}
+            const collectionRef = collection(db, 'artifacts', appId, 'public', 'data', 'files');
+            
+            // シンプルなクエリ（権限エラーを避けるため複合クエリは避ける）
+            unsubscribeSync = onSnapshot(collectionRef, (snapshot) => {
+                files = [];
+                snapshot.forEach((doc) => {
+                    files.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // JavaScript側でソート（インデックスエラー回避のため）
+                files.sort((a, b) => {
+                    const timeA = a.createdAt?.seconds || 0;
+                    const timeB = b.createdAt?.seconds || 0;
+                    return timeB - timeA;
+                });
+                
+                renderFiles();
+                renderAdminFiles();
+            }, (error) => {
+                console.error("Firestore Sync Error:", error);
+                // 権限エラーなどの場合、ユーザーに通知（任意）
+            });
+        }
 
         function createStars() {
             const container = document.getElementById('stars-container');
@@ -202,86 +314,14 @@
             }
         }
 
-        window.onload = () => {
-            createStars();
-            renderFiles();
-        };
-
-        function toggleAdminModal() {
-            const modal = document.getElementById('adminModal');
-            modal.classList.toggle('hidden');
-            document.getElementById('adminPassword').value = '';
-        }
-
-        function checkPassword() {
-            const pass = document.getElementById('adminPassword').value;
-            if (pass === ADMIN_PASS) {
-                document.getElementById('adminModal').classList.add('hidden');
-                document.getElementById('uploadArea').classList.remove('hidden');
-                renderAdminFiles();
-            } else {
-                alert("アクセス拒否：パスコードが一致しません。");
-            }
-        }
-
-        function logout() {
-            document.getElementById('uploadArea').classList.add('hidden');
-        }
-
-        function handleUpload() {
-            const title = document.getElementById('fileTitle').value;
-            const fileInput = document.getElementById('fileInput');
-            
-            if (!title || !fileInput.files[0]) {
-                alert("タイトルとファイルの両方を入力してください。");
-                return;
-            }
-
-            const file = fileInput.files[0];
-            const reader = new FileReader();
-
-            reader.onload = function(e) {
-                const now = new Date();
-                const newFile = {
-                    id: Date.now(),
-                    title: title.toUpperCase(),
-                    fileName: file.name,
-                    size: (file.size / 1024 / 1024).toFixed(2) + " MB",
-                    date: now.toLocaleDateString('ja-JP') + " " + now.toLocaleTimeString('ja-JP', {hour: '2-digit', minute:'2-digit'}),
-                    data: e.target.result
-                };
-
-                files.push(newFile);
-                saveAndRender();
-                
-                document.getElementById('fileTitle').value = '';
-                fileInput.value = '';
-                alert("配信完了：アーカイブにリソースが追加されました。");
-            };
-
-            reader.readAsDataURL(file);
-        }
-
-        function deleteFile(id) {
-            if (confirm("このデータをアーカイブから完全に抹消してもよろしいですか？")) {
-                files = files.filter(f => f.id !== id);
-                saveAndRender();
-            }
-        }
-
-        function saveAndRender() {
-            localStorage.setItem('pdf_files', JSON.stringify(files));
-            renderFiles();
-            renderAdminFiles();
-        }
-
         function renderFiles() {
             const list = document.getElementById('fileList');
-            const noFiles = document.getElementById('noFilesMessage');
-            
             if (files.length === 0) {
-                list.innerHTML = '';
-                list.appendChild(noFiles);
+                list.innerHTML = `
+                    <div id="noFilesMessage" class="text-center py-20 text-gray-500">
+                        <p class="text-xl mb-2">📡 信号が検出されません</p>
+                        <p class="text-sm">現在、アーカイブに公開されているリソースはありません。</p>
+                    </div>`;
                 return;
             }
 
@@ -294,10 +334,10 @@
                             </svg>
                         </div>
                         <div>
-                            <h3 class="text-xl font-bold text-white group-hover:text-blue-300 transition tracking-wide">${file.title}</h3>
+                            <h3 class="text-xl font-bold text-white group-hover:text-blue-300 transition tracking-wide uppercase">${file.title}</h3>
                             <div class="flex gap-4 mt-1">
-                                <span class="text-[10px] space-font text-blue-400/70 uppercase">タイムスタンプ: ${file.date}</span>
                                 <span class="text-[10px] space-font text-blue-400/70 uppercase">サイズ: ${file.size}</span>
+                                <span class="text-[10px] space-font text-blue-400/70 uppercase">送信元: ${file.authorId?.slice(0,8) || 'SYSTEM'}...</span>
                             </div>
                         </div>
                     </div>
@@ -310,7 +350,8 @@
 
         function renderAdminFiles() {
             const adminList = document.getElementById('adminFileList');
-            document.getElementById('fileCount').innerText = files.length;
+            const countEl = document.getElementById('fileCount');
+            if (countEl) countEl.innerText = files.length;
 
             if (files.length === 0) {
                 adminList.innerHTML = '<p class="text-center text-gray-500 py-10 text-xs space-font uppercase">現在管理中のリソースはありません。</p>';
@@ -321,31 +362,117 @@
                 <div class="bg-white/5 border border-white/10 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-white/10 transition group">
                     <div class="flex-1 min-w-0">
                         <div class="flex items-center gap-2 mb-1">
-                            <span class="text-blue-400 text-[10px] font-bold space-font">#${file.id.toString().slice(-4)}</span>
-                            <h4 class="font-bold text-white truncate text-sm">${file.title}</h4>
+                            <span class="text-blue-400 text-[10px] font-bold space-font">#${file.id.slice(0,6)}</span>
+                            <h4 class="font-bold text-white truncate text-sm uppercase">${file.title}</h4>
                         </div>
                         <div class="flex flex-wrap gap-x-4 gap-y-1 text-[9px] text-gray-400 uppercase font-bold">
                             <span>📄 ${file.fileName}</span>
-                            <span>📅 ${file.date}</span>
                             <span>💾 ${file.size}</span>
                         </div>
                     </div>
                     <div class="flex items-center gap-2 shrink-0">
                         <a href="${file.data}" target="_blank" class="text-[9px] space-font text-blue-300 hover:text-white border border-blue-500/30 px-3 py-1.5 rounded-lg transition bg-blue-500/5">閲覧</a>
-                        <button onclick="deleteFile(${file.id})" class="text-[9px] space-font text-red-400 hover:text-white border border-red-500/30 px-3 py-1.5 rounded-lg transition hover:bg-red-500/20 uppercase">消去</button>
+                        <button onclick="window.deleteData('${file.id}')" class="text-[9px] space-font text-red-400 hover:text-white border border-red-500/30 px-3 py-1.5 rounded-lg transition hover:bg-red-500/20 uppercase">消去</button>
                     </div>
                 </div>
-            `).sort((a,b) => b.id - a.id).join('');
+            `).join('');
         }
 
-        function filterFiles() {
-            const query = document.getElementById('searchInput').value.toLowerCase();
+        // アクション関数
+        window.handleUpload = async function() {
+            if (!currentUser) {
+                alert("認証が完了していません。通信環境を確認してください。");
+                return;
+            }
+
+            const titleInput = document.getElementById('fileTitle');
+            const fileInput = document.getElementById('fileInput');
+            const btn = document.getElementById('uploadBtn');
+            
+            const title = titleInput.value.trim();
+            if (!title || !fileInput.files[0]) {
+                alert("タイトルとファイルの両方を入力してください。");
+                return;
+            }
+
+            const file = fileInput.files[0];
+            // Firestoreの1MBドキュメント制限を超えないように制限
+            if (file.size > 800 * 1024) { 
+                alert("エラー：ファイルサイズが大きすぎます。800KB以下のPDFを選択してください。");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "UPLOADING...";
+
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    // 正しいパスでドキュメントを追加
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'files'), {
+                        title: title.toUpperCase(),
+                        fileName: file.name,
+                        size: (file.size / 1024 / 1024).toFixed(2) + " MB",
+                        data: e.target.result,
+                        authorId: currentUser.uid,
+                        createdAt: serverTimestamp()
+                    });
+                    
+                    titleInput.value = '';
+                    fileInput.value = '';
+                    alert("配信完了：アーカイブにリソースが追加されました。");
+                } catch (err) {
+                    console.error("Upload error:", err);
+                    alert("アップロード中にエラーが発生しました。権限が不足している可能性があります。");
+                } finally {
+                    btn.disabled = false;
+                    btn.innerText = "データを配信する";
+                }
+            };
+            reader.readAsDataURL(file);
+        };
+
+        window.deleteData = async function(docId) {
+            if (!currentUser) return;
+            if (confirm("このデータをアーカイブから完全に抹消してもよろしいですか？")) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'files', docId));
+                } catch (err) {
+                    console.error("Delete error:", err);
+                    alert("消去に失敗しました。");
+                }
+            }
+        };
+
+        window.toggleAdminModal = function() {
+            const modal = document.getElementById('adminModal');
+            modal.classList.toggle('hidden');
+            document.getElementById('adminPassword').value = '';
+        };
+
+        window.checkPassword = function() {
+            const ADMIN_PASS = "893012";
+            const pass = document.getElementById('adminPassword').value;
+            if (pass === ADMIN_PASS) {
+                document.getElementById('adminModal').classList.add('hidden');
+                document.getElementById('uploadArea').classList.remove('hidden');
+            } else {
+                alert("アクセス拒否：パスコードが一致しません。");
+            }
+        };
+
+        window.logout = function() {
+            document.getElementById('uploadArea').classList.add('hidden');
+        };
+
+        window.filterFiles = function() {
+            const queryText = document.getElementById('searchInput').value.toLowerCase();
             const cards = document.querySelectorAll('.file-card');
             cards.forEach(card => {
                 const title = card.querySelector('h3').innerText.toLowerCase();
-                card.style.display = title.includes(query) ? 'flex' : 'none';
+                card.style.display = title.includes(queryText) ? 'flex' : 'none';
             });
-        }
+        };
     </script>
 </body>
 </html>
